@@ -1,0 +1,1063 @@
+---
+title: Caracterización de tumores sólidos pediátricos según la infiltración del sistema inmune mediante datos transcriptómicos.
+subtitle: |
+  Trabajo Fin de Máster (TFM)
+  
+  Máster Universitario en Bioinformática y Bioestadística
+  
+  Área: Análisis de Datos Ómicos
+author: "María Ramírez García"
+date: "2026-06-03"
+output: 
+  html_document: 
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Impacto en sostenibilidad
+inicio <- proc.time()
+```
+
+
+# Descripción
+
+Este documento contiene el análisis transcriptómico realizado para la caracterización de tumores sólidos pediátricos según la infiltración del sistema inmune. El objetivo principal es explorar perfiles de expresión génica y estimar la presencia de distintos tipos celulares inmunes en muestras tumorales mediante herramientas bioinformáticas y análisis estadísticos en R.
+
+# Descarga y preprocesado
+ 
+## Carga de paquetes y librerias
+```{r include=FALSE}
+#Librerías
+library(cBioPortalData)
+library(summarytools)
+library(factoextra)
+library(ConsensusTME)
+library(GSVA)
+library(limma)
+library(pheatmap)
+library(ggplot2)
+library(tidyr)
+library(survival)
+library(survminer)
+library(dplyr)
+library(purrr)
+library(tibble)
+library(RColorBrewer)
+```
+## Funciones
+
+### Normalización TPM
+```{r función normalización, echo=TRUE}
+normalizar_tpm <- function(rna_seq) {
+  assay(rna_seq, "RPKM") <- assay(rna_seq)  #RPKM
+  assay(rna_seq, "TPM") <- apply(assay(rna_seq, "RPKM"),2,function(x) x / sum(x) * 1e6)  # Calcular TPM
+  return(rna_seq) 
+}
+```
+
+### Filtrado
+Se eliminar los genes con baja expresión. (descarta expresión mediana inferior a 1 TPM)
+
+```{r filtrado de genes, echo=TRUE}
+#descarta expresión mediana inferior a 1 TPM
+filtrar_genes <- function(rna_seq) {
+  drop <- which(apply(assay(rna_seq, "TPM"), 1, median) < 1)
+  rna_seq <- rna_seq[-drop, ]
+  rna_seq
+}
+```
+
+### Graficos exploratotios de variables
+Con el objetivo de evitar código redundante y mantener una representación homogénea entre cohortes, se definieron varias funciones para la generación automática de gráficos descriptivos de las variables clínicas seleccionadas.
+
+```{r}
+
+# Grafica sexo
+plot_sex <- function(dataset, nombreCohorte, figura){
+
+  p <- ggplot(dataset, aes(x = "", fill = SEX)) +
+    geom_bar(width = 1) +
+    coord_polar("y") +
+    theme_void() +
+    labs(
+      title = paste(
+        "Sexo en la cohorte de",
+        nombreCohorte
+      ),
+      fill = "Sexo"
+    ) +
+    geom_text(
+      stat = "count",
+      size = 4,
+      aes(label = paste0(
+        after_stat(count),
+        " (",
+        round(after_stat(count / sum(count) * 100), 1),
+        "%)"
+      )),
+      position = position_stack(vjust = 0.5)
+    ) +
+    theme(
+      plot.title = element_text(
+        size = 16,
+        face = "bold",
+        hjust = 0.5
+      ),
+      legend.title = element_text(
+        size = 13,
+        face = "bold"
+      ),
+      legend.text = element_text(
+        size = 12
+      )
+    )
+
+  print(p)
+
+  ggsave(figura, plot = p, width = 7, height = 7, dpi = 300)
+}
+
+
+# Grafica edad
+plot_age <- function(dataset, nombreCohorte, figura){
+
+  p <- ggplot(dataset, aes(x = AGE)) +
+    geom_histogram(
+      binwidth = 1,
+      fill = "steelblue",
+      color = "black",
+      boundary = 0
+    ) +
+    theme_classic() +
+    labs(
+      title = paste(
+        "Edad en la cohorte de",
+        nombreCohorte
+      ),
+      x = "Edad (años)",
+      y = "Número de pacientes"
+    ) +
+    scale_x_continuous(
+      breaks = seq(
+        0,
+        max(dataset$AGE, na.rm = TRUE),
+        by = 1
+      )
+    ) +
+    theme(
+      plot.title = element_text(
+        size = 16,
+        face = "bold",
+        hjust = 0.5
+      ),
+      axis.title = element_text(
+        size = 13,
+        face = "bold"
+      ),
+      axis.text = element_text(
+        size = 11
+      )
+    )
+
+  print(p)
+
+  ggsave(figura, plot = p, width = 7, height = 7, dpi = 300)
+}
+
+
+# Grafica estadio clínico
+plot_stage <- function(dataset, nombreCohorte, figura){
+
+  p <- ggplot(dataset, aes(x = CLINICAL_STAGE)) +
+    geom_bar(
+      fill = "darkcyan",
+      color = "black"
+    ) +
+    theme_classic() +
+    labs(
+      title = paste(
+        "Estadios clínicos en la cohorte de",
+        nombreCohorte
+      ),
+      x = "Estadio",
+      y = "Número de pacientes"
+    ) +
+    theme(
+      plot.title = element_text(
+        size = 16,
+        face = "bold",
+        hjust = 0.5
+      ),
+      axis.title = element_text(
+        size = 13,
+        face = "bold"
+      ),
+      axis.text = element_text(
+        size = 11
+      )
+    )
+
+  print(p)
+
+  ggsave(figura, plot = p, width = 7, height = 7, dpi = 300)
+}
+
+
+# Grafica estado vital
+plot_os <- function(dataset, nombreCohorte, figura){
+
+  p <- ggplot(dataset, aes(x = "", fill = OS_STATUS)) +
+    geom_bar(width = 1) +
+    coord_polar("y") +
+    theme_void() +
+    labs(
+      title = paste(
+        "Supervivencia en la cohorte de",
+        nombreCohorte
+      ),
+      fill = "Estado vital"
+    ) +
+    scale_fill_brewer(
+      palette = "Dark2",
+      na.value = "gray60"
+    ) +
+    geom_text(
+      stat = "count",
+      size = 4,
+      aes(label = paste0(
+        after_stat(count),
+        " (",
+        round(after_stat(count / sum(count) * 100), 1),
+        "%)"
+      )),
+      position = position_stack(vjust = 0.5)
+    ) +
+    theme(
+      plot.title = element_text(
+        size = 16,
+        face = "bold",
+        hjust = 0.5
+      ),
+      legend.title = element_text(
+        size = 13,
+        face = "bold"
+      ),
+      legend.text = element_text(
+        size = 12
+      )
+    )
+
+  print(p)
+
+  ggsave(figura, plot = p, width = 7, height = 7, dpi = 300)
+}
+```
+
+### Análisis clínico: sexo y edad.
+```{r}
+# Función de análisis
+analisis_limma <- function(m_scores, cohorte, resultado) {
+
+    design <- model.matrix(~ cohorte$SEX + cohorte$AGE)
+    fit <- lmFit(m_scores, design)
+    fit_ebayes <- eBayes(fit)
+
+    # Resultados sexo
+    res_sex <- topTable(
+        fit_ebayes,
+        coef = "cohorte$SEXMale",
+        number = Inf,
+        adjust.method = "BH"
+    )
+
+    # Resultados edad
+    res_age <- topTable(
+        fit_ebayes,
+        coef = "cohorte$AGE",
+        number = Inf,
+        adjust.method = "BH"
+    )
+
+    # Guardar resultados en R
+    resultado$res_sex <- res_sex
+    resultado$res_age <- res_age
+    resultado$fit <- fit_ebayes
+
+    return(resultado)
+}
+
+
+# Función boxplot sexo
+plot_boxplot_sex <- function(m_scores, cohorte, resultado) {
+
+    p <- ggplot(
+        pivot_longer(
+            data.frame(
+                t(m_scores),
+                SEX = cohorte$SEX
+            ),
+            cols = -SEX,
+            names_to = "celltype",
+            values_to = "score"
+        ),
+        aes(SEX, score, fill = SEX)
+    ) +
+        geom_boxplot() +
+        geom_jitter(width = 0.1, size = 0.8) +
+        facet_wrap(~ celltype, scales = "free_y") +
+        theme_bw()
+
+    # Guardar gráfica fuera de R
+    ggsave(
+        filename = paste0(resultado, "_boxplot_sex.png"),
+        plot = p,
+        width = 12,
+        height = 8
+    )
+
+    return(p)
+}
+
+
+# Función gráfico de dispersión edad
+plot_scatter_age <- function(m_scores, cohorte, resultado) {
+
+    p <- ggplot(
+        pivot_longer(
+            data.frame(
+                t(m_scores),
+                AGE = cohorte$AGE
+            ),
+            cols = -AGE,
+            names_to = "celltype",
+            values_to = "score"
+        ),
+        aes(AGE, score)
+    ) +
+        geom_point(size = 1) +
+        geom_smooth(method = "lm") +
+        facet_wrap(~ celltype, scales = "free_y") +
+        theme_bw()
+
+    # Guardar gráfica fuera de R
+    ggsave(
+        filename = paste0(resultado, "_scatter_age.png"),
+        plot = p,
+        width = 12,
+        height = 8
+    )
+
+    return(p)
+}
+```
+
+### Análisis clínico: Supervivencia
+```{r}
+# Preparar datos para análisis de supervivencia KM
+preparar_cohorte <- function(cohorte, scores_mat) {
+  clinc <- data.frame( sample_id = cohorte$PATIENT_ID, OS_STATUS = cohorte$OS_STATUS, OS_MONTHS = cohorte$OS_MONTHS ) %>%
+  mutate(OS_STATUS = as.integer(substr(OS_STATUS, 1, 1))) %>%
+  filter(!is.na(OS_STATUS), !is.na(OS_MONTHS))
+  results_t <- as.data.frame(t(scores_mat)) %>% rownames_to_column("sample_id")
+  inner_join(clinc, results_t, by = "sample_id")
+}
+
+# Categorizar los scores de las cohortes en "High" y "Low"
+categorizar <- function(data_cohorte) {
+  for (cel in tip_cel) {
+    med <- median(data_cohorte[[cel]], na.rm = TRUE)
+    data_cohorte[[paste0(cel, "_group")]] <- factor(
+      ifelse(data_cohorte[[cel]] >= med, "High", "Low"),
+      levels = c("Low", "High")
+    )
+  }
+  data_cohorte
+}
+```
+
+## Visualización estudios de cBioPortal
+```{r echo=TRUE}
+cbio <- cBioPortal() # 
+studies <- getStudies(cbio, buildReport = TRUE)
+
+# Busqueda de estudios pediatricos.
+studies[grep("pediatric", studies$name, ignore.case = TRUE), ]
+```
+
+Tras una búsqueda con R y el portal web de cBioPortal, se seleccionaron 4 cohortes diferentes para el análisis.
+
+- *Pediatric Rhabdoid Tumor (TARGET, 2018)*
+- *Pediatric Wilms' Tumor (TARGET, 2018)*
+- *Pediatric Neuroblastoma (TARGET, 2018)*
+- *Pediatric Brain Cancer (CPTAC/CHOP, Cell 2020)*
+
+```{r echo=TRUE}
+# Estudios seleccionados 
+estudios <- c(rt ="rt_target_2018_pub", brain = "brain_cptac_2020", wt = "wt_target_2018_pub", nbl= "nbl_target_2018_pub")
+```
+
+### **Pediatric Rhabdoid Tumor (TARGET, 2018)**
+```{r echo=TRUE}
+# Comprobar y ver archivos de RNA-Seq
+# Averiguar donde se encuentran los datos adecuados para el análisis 
+molecularProfiles(cbio,estudios["rt"])
+```
+Se confirma que contiene un archivo de expresión mRNA (RNA Seq RPKM)
+
+```{r contenido rt, echo=TRUE}
+# Trabajar con la cohorte
+rt <- cBioDataPack(estudios["rt"], ask = FALSE) 
+rt # MultiAssayExperiment
+```
+A continuación se crea un SummarizedExperiment con los datos correspondientes al RNA-Seq
+```{r}
+# Extraer datos de RNA-Seq y los datos clínicos asociados
+rt_rna_seq <- getWithColData(rt, "mrna_seq_rpkm")# SummarizedExperiment con datos iniciales
+```
+Exploración de los datos
+```{r}
+# Visualización del SE
+rt_rna_seq
+# Cambiar las filas por Hugo_Symbol
+rownames(rt_rna_seq) <- rowData(rt_rna_seq)$Hugo_Symbol
+# Comprobar si hay valores NA en el assay
+sum(is.na(assay(rt_rna_seq))) 
+# Valores duplicados
+table(table(rt_rna_seq$PATIENT_ID))
+```
+
+En el SE no se encuentran valores NA ni duplicaciones en las muestras, sin embargo la identificación de los genes es Entrez_Gene_Id por lo que se cambia a Hugo_symbol. 
+
+```{r preprocesado rt, echo=TRUE}
+# Normalizar y filtrar los datos de RNA-Seq 
+rt_rna_seq <- normalizar_tpm(rt_rna_seq) # Datos iniciales y normalizados (TPM)
+rt_rna_seq_fil <-filtrar_genes(rt_rna_seq) # Filtrado
+# comprobamos con las dimensiones
+dim(rt_rna_seq)
+dim(rt_rna_seq_fil)
+``` 
+Tras filtrar las filas han disminuido, lo que indica que una gran cantidad de genes presenta una una expresión inferior a 1TMP
+
+### **Pediatric Wilms' Tumor (TARGET, 2018)**
+```{r , echo=TRUE}
+# WT
+# Comprobar y ver archivos de RNA-Seq
+molecularProfiles(cbio,estudios["wt"]) #el RNA-Seq esta (RPKM))
+```
+
+```{r contenido wt, echo=TRUE}
+# Trabajar con el cohorte
+wt <- cBioDataPack(estudios["wt"], ask = FALSE) 
+wt # MultiAssayExperiment
+```
+
+```{r}
+# Extraer datos de RNA-Seq y los datos clínicos asociados
+wt_rna_seq <- getWithColData(wt, "mrna_seq_rpkm")# SummarizedExperiment con datos iniciales
+```
+
+Al extraer los datos, se muestra un aviso que indica que el se tiene duplicaciones.
+```{r}
+# Visualización del SE
+wt_rna_seq
+# Comprobar si hay valores NA en el assay
+sum(is.na(assay(wt_rna_seq))) 
+# Valores duplicados
+table(table(wt_rna_seq$PATIENT_ID))
+```
+
+En esta ocasión no hay valores NA pero si 5 muestras duplicadas. nos quedaremos con la inicial.
+
+```{r}
+#Eliminar duplicados
+wt_rna_seq <- wt_rna_seq[, !duplicated(wt_rna_seq$PATIENT_ID)] 
+table(table(wt_rna_seq$PATIENT_ID)) # comprobar que se han eliminado
+```
+
+Ya están limpios ahora se preprocesan
+```{r preprocesado Wt, echo=TRUE}
+# Normalizar y filtrar los datos de RNA-Seq 
+wt_rna_seq <- normalizar_tpm(wt_rna_seq) # Datos iniciales y normalizados (TPM) 
+wt_rna_seq_fil <-filtrar_genes(wt_rna_seq) # Filtrado
+# comprobamos con las dimensiones
+dim(wt_rna_seq)
+dim(wt_rna_seq_fil)
+```
+### **Pediatric Neuroblastoma (TARGET, 2018)**
+```{r nbl ,echo=TRUE}
+# nbl
+# Comprobar y ver archivos de RNA-Seq
+molecularProfiles(cbio,estudios["nbl"]) #(RPKM)
+```
+```{r}
+# Trabajar con el cohorte
+nbl <- cBioDataPack(estudios["nbl"], ask = FALSE) 
+nbl # MultiAssayExperiment
+```
+
+```{r}
+# Extraer datos de RNA-Seq y los datos clinicos asociados
+nbl_rna_seq <- getWithColData(nbl, "mrna_seq_rpkm")# SummarizedExperiment con datos iniciales
+```
+Al extraer los datos, se muestra un aviso que indica que el SE tiene duplicaciones.
+```{r}
+# Visualización del SE
+nbl_rna_seq
+# Comprobar si hay valores NA en el assay
+sum(is.na(assay(nbl_rna_seq))) 
+```
+Al comprobar los valores NA se muestra que hay una gran cantidad de estos, a continuación observamos como se distribuyen 
+```{r}
+#Eliminar NA
+# cuantas columnas tienen NA
+sum(colSums(is.na(assay(nbl_rna_seq))) > 0)
+# Como se destribuyen. Cuantas no tienen y cuantas si
+table(colSums(is.na(assay(nbl_rna_seq))))
+```
+Los valores NA se centran en 43 columnas, lo que indica que de las 143 muestras, 43 contienen NA. Posteriormente se observa como están distribuidos dentro de cada muestra. 
+Tras una observación mas detallada se puede ver que hay 100 muestras (columnas) sin ningún valor NA, 2 muestras con la mayor parte de NA y 41 muestras que contienen entre 1 y 25 valores NA. 
+Para evitar futuros errores se eliminan todas las muestras que contengan valores NA y se trabaja con las 100 muestras limpias.
+```{r}
+# Eliminar columnas con valores NA
+colum_NA <- colSums(is.na(assay(nbl_rna_seq))) == 0 
+nbl_rna_seq<- nbl_rna_seq[, colum_NA] 
+# comprobación 
+sum(is.na(assay(nbl_rna_seq))) 
+dim(nbl_rna_seq) # Hay 100 muestras (columnas)
+```
+
+se han eliminado las 43 columnas que contenian NA.
+A continución se miran las duplicaciones
+```{r}
+# Valores duplicados
+table(table(nbl_rna_seq$PATIENT_ID))
+```
+
+Tras eliminar valores NA vemos que las muestras duplicadas son 2. Se eliminan, manteniendo la primera muestra.
+
+```{r}
+# Eliminar muestras duplicadas
+nbl_rna_seq <- nbl_rna_seq[, !duplicated(nbl_rna_seq$PATIENT_ID)]
+table(table(nbl_rna_seq$PATIENT_ID))
+```
+Se han eliminado las muestras duplicadas y aquellas que podrían causar problemas por contener valores NA quedando 98 muestras en total.
+Después de limpiar se  normalizan y filtran los datos.
+
+```{r}
+# Normalizar y filtrar
+nbl_rna_seq <- normalizar_tpm(nbl_rna_seq) # Normalizar
+nbl_rna_seq_fil <-filtrar_genes(nbl_rna_seq) # Filtrado
+
+# comprobamos con las dimensiones
+dim(nbl_rna_seq)
+dim(nbl_rna_seq_fil) 
+```
+### **Pediatric Brain Cancer (CPTAC/CHOP, Cell 2020)**
+
+```{r contenido brain, echo=TRUE}
+# Comprobar y ver archivos de RNA-Seq
+molecularProfiles(cbio,estudios["brain"])
+```
+En esta cohorte el archivo de expresión mRNA contiene los count transformados (Log2 of FPKM + 1 expresstion values).
+Para parte del análisis se puede trabajar con ellos en este formato. Sin embargo, para tenerlo en el mismo formato que los demás cohortes, se calculara una aproximación a los valores iniciales FPKM.
+
+```{r}
+# Trabajar con el cohorte
+brain <- cBioDataPack(estudios["brain"], ask = FALSE) 
+brain # MultiAssayExperiment
+```
+
+Al iniciar con los datos en diferente formato a los anteriores la normalización TPM se realiza sin la función creada al inicio. 
+
+```{r}
+# Extraer datos de RNA-Seq y los datos clínicos asociados
+brain_rna_seq <- getWithColData(brain, "mrna_seq_v2_rsem")
+```
+
+Al extraer los datos, se muestra un aviso que indica que el SE tiene duplicaciones.
+```{r}
+# Visualización del SE
+brain_rna_seq
+# Comprobar si hay valores NA en el assay
+sum(is.na(assay(brain_rna_seq))) 
+```
+
+No contiene NA
+```{r}
+# Valores duplicados
+table(table(brain_rna_seq$PATIENT_ID))
+```
+Contiene 15 muestras duplicadas.
+```{r}
+# Eliminar duplicaciones
+brain_rna_seq <-brain_rna_seq[, !duplicated(brain_rna_seq$PATIENT_ID)]
+table(table(brain_rna_seq$PATIENT_ID))
+```
+Se han eliminado las muestras duplicadas
+
+```{r}
+# Guardar un assay con los datos trasformados.
+assay(brain_rna_seq, "Log2") <- assay(brain_rna_seq)
+# Aproximación de los valores iniciales a FPKM. fpkm <- exp2(log_fpkm) - 1
+assay(brain_rna_seq, "FPKM") <- 2^assay(brain_rna_seq) -1
+# Normalizar a TPM
+assay(brain_rna_seq, "TPM") <- apply(assay(brain_rna_seq, "FPKM"),2,function(x) x / sum(x) * 1e6)
+# Filtrar
+brain_rna_seq_fil <- filtrar_genes(brain_rna_seq)
+# comprobamos con las dimensiones
+dim(brain_rna_seq)
+dim(brain_rna_seq_fil) 
+```
+
+# Eliminar MultiAssayExperiment
+```{r}
+# Para liberar espacio, se queda solo los SE y su filtrado
+rm(rt,wt,nbl, brain, cbio, studies,rt_rna_seq, wt_rna_seq, nbl_rna_seq,brain_rna_seq)
+```
+
+
+
+# Análisis exploratorio
+
+## *Pediatric Rhabdoid Tumor (TARGET, 2018)*
+
+### PCA
+```{r}
+# PCA rt
+PCA_rt <- prcomp(t(assay(rt_rna_seq_fil, "TPM")), scale = T)
+fviz_pca_ind(PCA_rt, habillage = rt_rna_seq_fil$CANCER_TYPE, label = "none", title = "PCA Tumor rabdoide") # Grafico según tipo tumor 
+```
+
+### Variables clínicas
+```{r}
+# Resumen de las variables clínicas en html
+view( dfSummary(as.data.frame(colData(rt_rna_seq_fil))))
+```
+
+Después de una visualización global se escogen las variables con más interés para el estudio y se representan gráficamente.
+
+```{r VC rt, echo=TRUE}
+# Análisis variables seleccionadas
+plot_sex(as.data.frame(colData(rt_rna_seq_fil)),"tumor rabdoide", "sexo_rt.png")
+plot_age(as.data.frame(colData(rt_rna_seq_fil)),"tumor rabdoide", "edad_rt.png")
+plot_stage(as.data.frame(colData(rt_rna_seq_fil)),"tumor rabdoide", "estadio_rt.png")
+plot_os(as.data.frame(colData(rt_rna_seq_fil)),"tumor rabdoide", "os_rt.png")
+```
+
+## *Pediatric Wilms' Tumor (TARGET, 2018)*
+### PCA
+```{r}
+PCA_wt <- prcomp(t(assay(wt_rna_seq_fil, "TPM")), scale = T)
+fviz_pca_ind(PCA_wt, habillage = wt_rna_seq_fil$CANCER_TYPE, label = "none",
+             title = "PCA Tumor Wilms")
+```
+
+```{r}
+# Resumen de las variables clínicas 
+view(dfSummary(as.data.frame(colData(wt_rna_seq_fil))))
+```
+
+
+```{r VC wt, echo=TRUE}
+# Análisis variables seleccionadas
+plot_sex(as.data.frame(colData(wt_rna_seq_fil)),"tumor de Wilms", "sexo_wt.png")
+plot_age(as.data.frame(colData(wt_rna_seq_fil)),"tumor de Wilms", "edad_wt.png")
+plot_stage(as.data.frame(colData(wt_rna_seq_fil)),"tumor de Wilms", "estadio_wt.png")
+plot_os(as.data.frame(colData(wt_rna_seq_fil)),"tumor de Wilms", "os_wt.png")
+```
+
+
+## *Pediatric Neuroblastoma (TARGET, 2018)*
+### PCA
+```{r}
+PCA_nbl <- prcomp(t(assay(nbl_rna_seq_fil, "TPM")), scale = T)
+fviz_pca_ind(PCA_nbl, habillage = nbl_rna_seq_fil$CANCER_TYPE,label = "none", title="PCA Neuroblastoma")
+```
+### Variables clínicas
+```{r}
+# Resumen de las variables clínicas 
+view(dfSummary(as.data.frame(colData(nbl_rna_seq_fil))))
+```
+```{r VC nbl, echo=TRUE}
+# Análisis variables seleccionadas
+plot_sex(as.data.frame(colData(nbl_rna_seq_fil)),"neuroblastoma", "sexo_nbl.png")
+plot_age(as.data.frame(colData(nbl_rna_seq_fil)),"neuroblastoma", "edad_nbl.png")
+plot_os(as.data.frame(colData(nbl_rna_seq_fil)),"neuroblastoma", "os_nbl.png")
+```
+En esta cohorte, el estadio clínico se encuentra definido como INSS_STAGE en los datos clínicos. Por ello, el gráfico se generó mediante un código específico y no utilizando la función general definida previamente.
+```{r}
+# Estadios 
+ggplot(as.data.frame(colData(nbl_rna_seq_fil)), aes(x = INSS_STAGE)) +
+  geom_bar(binwidth = 1, 
+           fill = "darkcyan", 
+           color = "black", 
+           boundary = 0) + 
+  theme_classic() + 
+  labs(title = "Estadios clínicos en la cohorte de neuroblastoma", 
+       x = "Estadio", 
+       y = "Número de pacientes") 
+ggsave("estadio_nbl.png", width = 6, height = 6)
+```
+
+
+## *Pediatric Brain Cancer (CPTAC/CHOP, Cell 2020)*
+### PCA
+```{r}
+# PCA rt
+PCA_brain <- prcomp(t(assay(brain_rna_seq_fil, "TPM")), scale = T)
+fviz_pca_ind(PCA_brain, habillage = brain_rna_seq_fil$CANCER_TYPE, label = "none", title= "PCA Cancer Cerebral")
+```
+
+Dentro de esta cohorte si hay diferentes tipos de cáncer cerebral.
+
+
+### Variables clínicas
+
+```{r}
+# Resumen de las variables clínicas 
+view(dfSummary(as.data.frame(colData(brain_rna_seq_fil))))
+```
+
+```{r VC brain, echo=TRUE}
+# Análisis variables seleccionadas
+plot_sex(as.data.frame(colData(brain_rna_seq_fil)),"tumores cerebrales", "sexo_brain.png")
+plot_age(as.data.frame(colData(brain_rna_seq_fil)),"tumores cerebrales", "edad_brain.png")
+plot_os(as.data.frame(colData(brain_rna_seq_fil)),"tumores cerebrales", "os_brain.png")
+```
+
+```{r}
+# Tipos de cancer
+ggplot(
+  as.data.frame(colData(brain_rna_seq_fil)),
+  aes(x = "", fill = CANCER_TYPE)
+) +
+  geom_bar(width = 1) +
+  coord_polar("y") +
+  theme_void() +
+  scale_fill_brewer(palette = "Set1") +
+  labs(
+    title = "Tipos de cáncer cerebral",
+    fill = "Tipo tumoral"
+  ) +
+  geom_text(
+    stat = "count",
+    size = 4,
+    aes(label = paste0(
+      after_stat(count),
+      " (",
+      round(after_stat(count / sum(count) * 100), 1),
+      "%)"
+    )),
+    position = position_stack(vjust = 0.3)
+  ) +
+  theme(
+    plot.title = element_text(
+      size = 16,
+      face = "bold",
+      hjust = 0.5
+    ),
+    legend.title = element_text(
+      size = 13,
+      face = "bold"
+    ),
+    legend.text = element_text(
+      size = 12
+    )
+  )
+```
+
+# Deconvolución 
+Para aplicar el método consensusTME, se utilizaron matrices de expresión previamente transformadas a formato TPM. Se verificó que los genes estuvieran anotados con identificadores HGNC y se eliminaron duplicados mediante la función avereps() del paquete limma.
+
+El análisis se realizó utilizando la función consensusTMEAnalysis con statMethod = "ssgsea" y cancerType = "Unfiltered", evitando el uso de referencias específicas de cáncer adulto en un contexto pediátrico.
+
+El análisis se llevó a cabo de forma independiente en cada cohorte y posteriormente de manera conjunta. Dado que el método ssGSEA calcula scores de enriquecimiento de forma individual para cada muestra (single-sample), los resultados obtenidos pueden compararse entre cohortes.
+
+Los scores ssGSEA, que reflejan el enriquecimiento relativo de firmas celulares, se representaron mediante heatmaps con escalado por fila (scale = "row") para comparar patrones relativos entre muestras tumorales.
+
+## Comparación intracohortes
+```{r}
+# Pediatric Rhabdoid Tumor
+# Comprobar filas duplicadas.
+sum(duplicated(rownames(rt_rna_seq_fil, "TPM")))
+# Trabajo con assay "TPM"
+m_rt <-avereps(assay(rt_rna_seq_fil, "TPM"))
+sum(duplicated(rownames(m_rt)))
+# ejecutar análisis
+results_rt <- consensusTMEAnalysis(m_rt,cancerType = "Unfiltered",statMethod = "ssgsea")
+# Representación con heatmap
+pheatmap(results_rt,scale = "row",show_colnames = FALSE)
+```
+
+```{r}
+# Pediatric Wilms Tumor
+# Comprobar filas duplicadas.
+sum(duplicated(rownames(wt_rna_seq_fil, "TPM")))
+# Trabajo con assay "TPM"
+m_wt <-avereps(assay(wt_rna_seq_fil, "TPM"))
+sum(duplicated(rownames(m_wt)))
+# ejecutar análisis
+results_wt <- consensusTMEAnalysis(m_wt,cancerType = "Unfiltered",statMethod = "ssgsea")
+# Representación con heatmap
+pheatmap(results_wt,scale = "row",show_colnames = FALSE)
+```
+
+```{r}
+# Pediatric Neuroblastoma
+# Comprobar filas duplicadas.
+sum(duplicated(rownames(nbl_rna_seq_fil, "TPM")))
+# Trabajo con assay "TPM"
+m_nbl <-avereps(assay(nbl_rna_seq_fil, "TPM"))
+sum(duplicated(rownames(m_nbl)))
+# ejecutar análisis
+results_nbl <- consensusTMEAnalysis(m_nbl,cancerType = "Unfiltered",statMethod = "ssgsea")
+# Representación con heatmap
+pheatmap(results_nbl,scale = "row",show_colnames = FALSE)
+```
+
+```{r}
+# Pediatric Brain Cancer
+# Comprobar filas duplicadas.
+sum(duplicated(rownames(brain_rna_seq_fil, "TPM")))
+# Trabajo con assay "TPM"
+m_brain <-avereps(assay(brain_rna_seq_fil, "TPM"))
+sum(duplicated(rownames(m_brain)))
+# ejecutar análisis
+results_brain <- consensusTMEAnalysis(m_brain,cancerType = "Unfiltered",statMethod = "ssgsea")
+# Representación con heatmap
+pheatmap(results_brain,scale = "row",show_colnames = FALSE)
+```
+## Comparación entre cohortes
+```{r}
+# Integrar scores
+results <- cbind(results_brain, results_nbl, results_rt, results_wt)
+# Representación
+colnames(results) <- make.unique(colnames(results))
+annotation_res <- data.frame(
+  TumorType = c(
+    as.character(colData(brain_rna_seq_fil)$CANCER_TYPE),
+    as.character(colData(nbl_rna_seq_fil)$CANCER_TYPE),
+    as.character(colData(rt_rna_seq_fil)$CANCER_TYPE),
+    as.character(colData(wt_rna_seq_fil)$CANCER_TYPE)
+  ),
+  Sex = c(
+    as.character(colData(brain_rna_seq_fil)$SEX),
+    as.character(colData(nbl_rna_seq_fil)$SEX),
+    as.character(colData(rt_rna_seq_fil)$SEX),
+    as.character(colData(wt_rna_seq_fil)$SEX)
+  ),
+  row.names = colnames(results)
+)
+
+ann_colors <- list(
+  TumorType = c(
+    "CNS Cancer"                    = "#E41A1C",
+    "Embryonal Tumor"               = "#FF7F00",
+    "Glioma"                        = "#4DAF4A",
+    "High-grade glioma/astrocytoma" = "#984EA3",
+    "Low-grade glioma/astrocytoma"  = "#377EB8",
+    "Peripheral Nervous System"     = "#A65628",
+    "Rhabdoid Cancer"               = "#F781BF",
+    "Sellar Tumor"                  = "#FFFF33",
+    "Wilms Tumor"                   = "#00CED1"
+  ),
+  Sex = c("Female" = "#F4A582", "Male" = "#92C5DE")
+)
+
+png("heatmap.png", width = 2400, height = 1600, res = 200)
+pheatmap(
+  results,
+  scale             = "row",
+  show_colnames     = FALSE,
+  annotation_col    = annotation_res,
+  annotation_colors = ann_colors
+)
+dev.off()
+```
+
+# Análisis Clínico 
+
+## Sexo y edad
+
+Para estudiar la asociación entre los perfiles de infiltración inmunitaria y el sexo y la edad se emplea el paquete limma.
+
+El análisis se realizó mediante un modelo lineal múltiple utilizando como variable dependiente los scores de infiltración inmunitaria obtenidos por el método consensusTME y como variables independientes el sexo y la edad:
+
+score∼SEX+AGE
+
+- *Pediatric Rhabdoid Tumor (TARGET, 2018)*
+
+En la exploración inicial de las variables, se observan pacientes que no tienen el sexo y/o edad anotada, en concreto 3, para evitar errores se eliminan estas muestras del análisis.
+
+```{r}
+# Comprobar valores NA
+sum(is.na(rt_rna_seq_fil$SEX))
+sum(is.na(rt_rna_seq_fil$AGE))
+```
+
+```{r}
+# Extraer los valores de sexo y edad
+sex_edad_rt<-data.frame(rt_rna_seq_fil$SEX, rt_rna_seq_fil$AGE)
+# Nombrar las columnas
+colnames(sex_edad_rt)<- c("SEX","AGE")
+# Nombrar las filas con los pacientes
+rownames(sex_edad_rt)<- rt_rna_seq_fil$PATIENT_ID
+# Guarda los valores diferentes a NA
+sex_edad_rt<- sex_edad_rt[!is.na(sex_edad_rt$SEX),]
+# Comprobar que se han eliminado
+sum(is.na(sex_edad_rt))
+dim(sex_edad_rt)
+head(sex_edad_rt)
+# Filtrar resultados
+results_rt_fil <- results_rt[,rownames(sex_edad_rt)]
+```
+Se realiza el análisis
+```{r}
+# Análisis lineal
+design <- model.matrix(~ sex_edad_rt$SEX + sex_edad_rt$AGE)
+fit <- lmFit(results_rt_fil, design)
+fit_rt <- eBayes(fit)
+# Resultados
+res_sex_rt <- topTable(
+    fit_rt,
+    coef = "sex_edad_rt$SEXMale",
+    number = Inf,
+    adjust.method = "BH"
+)
+res_age_rt <- topTable(
+    fit_rt,
+    coef = "sex_edad_rt$AGE",
+    number = Inf,
+    adjust.method = "BH"
+)
+
+res_sex_rt
+res_age_rt
+plot_boxplot_sex(results_rt_fil,sex_edad_rt,"rt_sex_age")
+plot_scatter_age(results_rt_fil,sex_edad_rt,"rt_sex_age")
+```
+
+- *Pediatric Brain Cancer (CPTAC/CHOP, Cell 2020)*
+```{r}
+analisis_limma(results_brain,brain_rna_seq_fil,"brain_sex_age")
+plot_boxplot_sex(results_brain,brain_rna_seq_fil,"brain_sex_age")
+plot_scatter_age(results_brain,brain_rna_seq_fil,"brain_sex_age")
+```
+- *Pediatric Wilms' Tumor (TARGET, 2018)*
+```{r}
+analisis_limma(results_wt,wt_rna_seq_fil,"wt_sex_age")
+plot_boxplot_sex(results_wt,wt_rna_seq_fil,"wt_sex_age")
+plot_scatter_age(results_wt,wt_rna_seq_fil,"wt_sex_age")
+```
+- *Pediatric Neuroblastoma (TARGET, 2018)*
+```{r}
+analisis_limma(results_nbl,nbl_rna_seq_fil,"nbl_sex_age")
+plot_boxplot_sex(results_nbl,nbl_rna_seq_fil,"nbl_sex_age")
+plot_scatter_age(results_nbl,nbl_rna_seq_fil,"nbl_sex_age")
+```
+## Supervivencia
+```{r}
+# Preparar datos de cada cohorte
+data_surv_nbl <- preparar_cohorte(nbl_rna_seq_fil,   results_nbl)
+data_surv_rt <- preparar_cohorte(rt_rna_seq_fil,    results_rt)
+data_surv_wt <- preparar_cohorte(wt_rna_seq_fil,    results_wt)
+
+# Preparar datos para brain
+data_surv_brain <-  data.frame( sample_id = brain_rna_seq_fil$PATIENT_ID, OS_STATUS = brain_rna_seq_fil$OS_STATUS, OS_MONTHS = brain_rna_seq_fil$OS_MONTHS ) %>% mutate(OS_STATUS = c("DECEASED" = 1, "LIVING"   = 0)[OS_STATUS])
+results_brain_t <- as.data.frame(t(results_brain)) %>% rownames_to_column("sample_id")
+data_surv_brain <- inner_join(data_surv_brain, results_brain_t, by = "sample_id")
+
+# Nombres de los tipos celulares inmunes
+tip_cel <- rownames(results)
+
+#Agrupar en lista las cohortes caracterizadas
+data_list <- list( NBL = categorizar(data_surv_nbl),RT = categorizar(data_surv_rt), WT = categorizar(data_surv_wt), BRAIN = categorizar(data_surv_brain))
+
+# Crear lista de fórmulas
+formulas <- lapply(tip_cel, function(cel) {
+  as.formula(paste0("Surv(OS_MONTHS, OS_STATUS) ~ ", cel, "_group"))
+})
+names(formulas) <- tip_cel
+```
+
+### Tabla de p.valores
+```{r}
+# Por cohorte
+pvals_NBL   <- c()
+pvals_RT    <- c()
+pvals_WT    <- c()
+pvals_BRAIN <- c()
+
+for (cel in names(formulas)) {
+  fit <- survfit(formulas[[cel]], data = data_list$NBL)
+  pvals_NBL[cel] <- round(surv_pvalue(fit, data = data_list$NBL)$pval, 4)
+  
+  fit <- survfit(formulas[[cel]], data = data_list$RT)
+  pvals_RT[cel] <- round(surv_pvalue(fit, data = data_list$RT)$pval, 4)
+  
+  fit <- survfit(formulas[[cel]], data = data_list$WT)
+  pvals_WT[cel] <- round(surv_pvalue(fit, data = data_list$WT)$pval, 4)
+  
+  fit <- survfit(formulas[[cel]], data = data_list$BRAIN)
+  pvals_BRAIN[cel] <- round(surv_pvalue(fit, data = data_list$BRAIN)$pval, 4)
+}
+
+tabla_pval <- data.frame(
+  NBL   = pvals_NBL,
+  RT    = pvals_RT,
+  WT    = pvals_WT,
+  BRAIN = pvals_BRAIN
+)
+
+tabla_pval
+write.csv(tabla_pval, "pval_surv.csv")
+```
+
+### Graficas de supervivencia
+```{r}
+# Generar todos los plots de todas las cohortes
+plots_todos <- list()
+
+for (cohort in names(data_list)) {
+  for (cel in names(formulas)) {
+    fit  <- survfit(formulas[[cel]], data = data_list[[cohort]])
+    pval <- round(surv_pvalue(fit, data = data_list[[cohort]])$pval, 4)
+    p <- ggsurvplot(
+      fit,
+      data        = data_list[[cohort]],
+      size        = 1,
+      palette     = c("#2196F3", "#F44336"),
+      conf.int    = FALSE,
+      pval        = pval,
+      pval.coord  = c(90, 0.90),
+      risk.table  = FALSE,
+      legend.labs = c("Low", "High"),
+      title       = paste0(cohort, " - ", cel),
+      ggtheme     = theme_bw()
+    )
+    plots_todos[[paste0(cohort, "_", cel)]] <- p$plot
+  }
+}
+# Guardar en PDF
+pdf("KM_todas_cohortes.pdf", width = 16, height = 8)
+print(gridExtra::marrangeGrob(grobs = plots_todos, nrow = 2, ncol = 4, top = NULL))
+dev.off()
+```
+
+# Impacto en sostenibilidad
+```{r}
+# Pon esto en el último chunk
+tiempo_seg <- (proc.time() - inicio)["elapsed"]
+
+watts_cpu  <- 15                          # ajusta si tienes un CPU más potente
+kwh        <- (watts_cpu * tiempo_seg) / (1000 * 3600)
+co2_gramos <- kwh * 450                   # ~450 gCO2/kWh para México
+
+cat(sprintf("Tiempo de ejecución: %.2f s\n", tiempo_seg))
+cat(sprintf("Energía consumida:   %.6f kWh\n", kwh))
+cat(sprintf("CO₂ estimado:        %.4f g CO₂\n", co2_gramos))
+```
